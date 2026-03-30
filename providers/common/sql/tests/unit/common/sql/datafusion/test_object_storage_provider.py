@@ -69,9 +69,11 @@ class TestObjectStorageProvider:
         assert local_store == mock_local.return_value
 
     @patch("airflow.providers.common.sql.datafusion.object_storage_provider.GoogleCloud", autospec=True)
+    @patch("airflow.providers.google.common.hooks.base_google.get_field", return_value=None)
     @patch("airflow.providers.google.common.hooks.base_google.GoogleBaseHook", autospec=True)
-    def test_gcs_provider_key_path(self, mock_hook_cls, mock_gcs):
+    def test_gcs_provider_key_path(self, mock_hook_cls, mock_get_field, mock_gcs):
         """key_path credential is passed as service_account_path."""
+        mock_hook_cls.return_value.extras = {}
         mock_hook_cls.return_value.provide_gcp_credential_file_as_context.return_value.__enter__.return_value = "/path/to/keyfile.json"
         provider = GCSObjectStorageProvider()
         connection_config = ConnectionConfig(conn_id="gcp_default")
@@ -86,9 +88,11 @@ class TestObjectStorageProvider:
         assert provider.get_scheme() == "gs://"
 
     @patch("airflow.providers.common.sql.datafusion.object_storage_provider.GoogleCloud", autospec=True)
+    @patch("airflow.providers.google.common.hooks.base_google.get_field", return_value=None)
     @patch("airflow.providers.google.common.hooks.base_google.GoogleBaseHook", autospec=True)
-    def test_gcs_provider_keyfile_dict(self, mock_hook_cls, mock_gcs):
+    def test_gcs_provider_keyfile_dict(self, mock_hook_cls, mock_get_field, mock_gcs):
         """keyfile_dict written to temp file by hook; path passed as service_account_path."""
+        mock_hook_cls.return_value.extras = {}
         mock_hook_cls.return_value.provide_gcp_credential_file_as_context.return_value.__enter__.return_value = "/tmp/tmpABCDEF.json"
         provider = GCSObjectStorageProvider()
         connection_config = ConnectionConfig(conn_id="gcp_default")
@@ -99,9 +103,11 @@ class TestObjectStorageProvider:
         assert store == mock_gcs.return_value
 
     @patch("airflow.providers.common.sql.datafusion.object_storage_provider.GoogleCloud", autospec=True)
+    @patch("airflow.providers.google.common.hooks.base_google.get_field", return_value=None)
     @patch("airflow.providers.google.common.hooks.base_google.GoogleBaseHook", autospec=True)
-    def test_gcs_provider_adc_fallback(self, mock_hook_cls, mock_gcs):
+    def test_gcs_provider_adc_fallback(self, mock_hook_cls, mock_get_field, mock_gcs):
         """No credentials configured: hook yields None and GoogleCloud is built without a path (ADC)."""
+        mock_hook_cls.return_value.extras = {}
         mock_hook_cls.return_value.provide_gcp_credential_file_as_context.return_value.__enter__.return_value = None
         provider = GCSObjectStorageProvider()
         connection_config = ConnectionConfig(conn_id="gcp_default")
@@ -111,6 +117,102 @@ class TestObjectStorageProvider:
         mock_gcs.assert_called_once_with(bucket_name="my-bucket")
         assert store == mock_gcs.return_value
 
+    @patch("airflow.providers.common.sql.datafusion.object_storage_provider.GoogleCloud", autospec=True)
+    @patch("os.path.exists", return_value=True)
+    @patch("airflow.providers.google.common.hooks.base_google.GoogleBaseHook", autospec=True)
+    def test_gcs_provider_credential_config_file_path(self, mock_hook_cls, mock_exists, mock_gcs):
+        """credential_config_file as a file path is passed as service_account_path."""
+        mock_hook_cls.return_value.extras = {}
+        mock_hook_cls.return_value.provide_gcp_credential_file_as_context.return_value.__enter__.return_value = None
+
+        def get_field_side_effect(extras, field):
+            return "/path/to/credential_config.json" if field == "credential_config_file" else None
+
+        provider = GCSObjectStorageProvider()
+        connection_config = ConnectionConfig(conn_id="gcp_default")
+
+        with patch(
+            "airflow.providers.google.common.hooks.base_google.get_field",
+            side_effect=get_field_side_effect,
+        ):
+            store = provider.create_object_store("gs://my-bucket/path", connection_config)
+
+        mock_gcs.assert_called_once_with(
+            service_account_path="/path/to/credential_config.json", bucket_name="my-bucket"
+        )
+        assert store == mock_gcs.return_value
+
+    @patch("airflow.providers.common.sql.datafusion.object_storage_provider.GoogleCloud", autospec=True)
+    @patch("os.path.exists", return_value=False)
+    @patch("airflow.providers.google.common.hooks.base_google.GoogleBaseHook", autospec=True)
+    def test_gcs_provider_credential_config_file_inline_json(self, mock_hook_cls, mock_exists, mock_gcs):
+        """credential_config_file as inline JSON string is written to temp file."""
+        mock_hook_cls.return_value.extras = {}
+        mock_hook_cls.return_value.provide_gcp_credential_file_as_context.return_value.__enter__.return_value = None
+        inline_json = '{"type": "external_account", "audience": "//iam.googleapis.com/projects/123"}'
+
+        def get_field_side_effect(extras, field):
+            return inline_json if field == "credential_config_file" else None
+
+        provider = GCSObjectStorageProvider()
+        connection_config = ConnectionConfig(conn_id="gcp_default")
+
+        with patch(
+            "airflow.providers.google.common.hooks.base_google.get_field",
+            side_effect=get_field_side_effect,
+        ):
+            store = provider.create_object_store("gs://my-bucket/path", connection_config)
+
+        mock_gcs.assert_called_once()
+        call_kwargs = mock_gcs.call_args.kwargs
+        assert "service_account_path" in call_kwargs
+        assert call_kwargs["bucket_name"] == "my-bucket"
+        assert store == mock_gcs.return_value
+
+    @patch("airflow.providers.common.sql.datafusion.object_storage_provider.GoogleCloud", autospec=True)
+    @patch("os.path.exists", return_value=False)
+    @patch("airflow.providers.google.common.hooks.base_google.GoogleBaseHook", autospec=True)
+    def test_gcs_provider_credential_config_file_dict(self, mock_hook_cls, mock_exists, mock_gcs):
+        """credential_config_file as dict is serialised to JSON and written to temp file."""
+        mock_hook_cls.return_value.extras = {}
+        mock_hook_cls.return_value.provide_gcp_credential_file_as_context.return_value.__enter__.return_value = None
+        config_dict = {"type": "external_account", "audience": "//iam.googleapis.com/projects/123"}
+
+        def get_field_side_effect(extras, field):
+            return config_dict if field == "credential_config_file" else None
+
+        provider = GCSObjectStorageProvider()
+        connection_config = ConnectionConfig(conn_id="gcp_default")
+
+        with patch(
+            "airflow.providers.google.common.hooks.base_google.get_field",
+            side_effect=get_field_side_effect,
+        ):
+            store = provider.create_object_store("gs://my-bucket/path", connection_config)
+
+        mock_gcs.assert_called_once()
+        call_kwargs = mock_gcs.call_args.kwargs
+        assert "service_account_path" in call_kwargs
+        assert call_kwargs["bucket_name"] == "my-bucket"
+        assert store == mock_gcs.return_value
+
+    @patch("airflow.providers.google.common.hooks.base_google.GoogleBaseHook", autospec=True)
+    def test_gcs_provider_key_secret_name_raises(self, mock_hook_cls):
+        """key_secret_name (Secret Manager) is not supported and raises ValueError."""
+        mock_hook_cls.return_value.extras = {}
+        provider = GCSObjectStorageProvider()
+        connection_config = ConnectionConfig(conn_id="gcp_default")
+
+        def get_field_side_effect(extras, field):
+            return "my-secret-key" if field == "key_secret_name" else None
+
+        with patch(
+            "airflow.providers.google.common.hooks.base_google.get_field",
+            side_effect=get_field_side_effect,
+        ):
+            with pytest.raises(ObjectStoreCreationException, match="Failed to create GCS object store"):
+                provider.create_object_store("gs://my-bucket/path", connection_config)
+
     def test_gcs_provider_no_connection_config_raises(self):
         provider = GCSObjectStorageProvider()
 
@@ -118,8 +220,10 @@ class TestObjectStorageProvider:
             provider.create_object_store("gs://my-bucket/path", connection_config=None)
 
     @patch("airflow.providers.common.sql.datafusion.object_storage_provider.GoogleCloud", autospec=True)
+    @patch("airflow.providers.google.common.hooks.base_google.get_field", return_value=None)
     @patch("airflow.providers.google.common.hooks.base_google.GoogleBaseHook", autospec=True)
-    def test_gcs_provider_failure(self, mock_hook_cls, mock_gcs):
+    def test_gcs_provider_failure(self, mock_hook_cls, mock_get_field, mock_gcs):
+        mock_hook_cls.return_value.extras = {}
         mock_hook_cls.return_value.provide_gcp_credential_file_as_context.return_value.__enter__.return_value = "/path/to/key.json"
         mock_gcs.side_effect = Exception("GCS Error")
         provider = GCSObjectStorageProvider()

@@ -79,19 +79,67 @@ class GCSObjectStorageProvider(ObjectStorageProvider):
         return StorageType.GCS
 
     def create_object_store(self, path: str, connection_config: ConnectionConfig | None = None):
-        """Create a GCS object store using DataFusion's GoogleCloud."""
+        """
+        Create a GCS object store using DataFusion's GoogleCloud.
+
+        Supported auth modes (in priority order):
+
+        - ``key_path`` / ``keyfile_dict``: resolved to a file path via
+          ``provide_gcp_credential_file_as_context`` and passed as ``service_account_path``.
+        - ``credential_config_file``: passed as ``service_account_path``. If the value is an
+          inline JSON string or dict it is written to a temporary file first.
+        - No credentials set: DataFusion falls back to Application Default Credentials (ADC).
+
+        Not supported: ``key_secret_name`` (Secret Manager) and ``impersonation_chain`` — these
+        require capabilities outside DataFusion's ``GoogleCloud`` object-store API.
+        """
         if connection_config is None:
             raise ValueError(f"connection_config must be provided for {self.get_storage_type}")
 
         try:
-            from airflow.providers.google.common.hooks.base_google import GoogleBaseHook
+            import json
+            import os
+            import tempfile
+
+            from airflow.providers.google.common.hooks.base_google import GoogleBaseHook, get_field
 
             bucket = self.get_bucket(path)
             gcp_hook = GoogleBaseHook(gcp_conn_id=connection_config.conn_id)
 
+            if get_field(gcp_hook.extras, "key_secret_name"):
+                raise ValueError(
+                    "GCS auth mode 'key_secret_name' (Secret Manager) is not supported by the "
+                    "DataFusion object store. Use 'key_path' or 'keyfile_dict' instead."
+                )
+
             with gcp_hook.provide_gcp_credential_file_as_context() as cred_file:
-                credentials = {"service_account_path": cred_file} if cred_file else {}
-                gcs_store = GoogleCloud(**credentials, bucket_name=bucket)
+                if cred_file is not None:
+                    # key_path or keyfile_dict
+                    gcs_store = GoogleCloud(service_account_path=cred_file, bucket_name=bucket)
+                else:
+                    credential_config_file = get_field(gcp_hook.extras, "credential_config_file")
+                    if credential_config_file is not None:
+                        # Workload Identity Federation via credential_config_file
+                        if isinstance(credential_config_file, str) and os.path.exists(credential_config_file):
+                            gcs_store = GoogleCloud(
+                                service_account_path=credential_config_file,
+                                bucket_name=bucket,
+                            )
+                        else:
+                            # Inline dict or JSON string — write to temp file
+                            with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as tmp:
+                                content = (
+                                    json.dumps(credential_config_file)
+                                    if isinstance(credential_config_file, dict)
+                                    else credential_config_file
+                                )
+                                tmp.write(content)
+                                tmp.flush()
+                                gcs_store = GoogleCloud(service_account_path=tmp.name, bucket_name=bucket)
+                    else:
+                        # ADC fallback
+                        gcs_store = GoogleCloud(bucket_name=bucket)
+
                 self.log.info("Created GCS object store for bucket %s", bucket)
                 return gcs_store
 
