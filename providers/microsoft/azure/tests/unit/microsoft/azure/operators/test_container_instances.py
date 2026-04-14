@@ -648,10 +648,8 @@ class TestACIOperator:
         "airflow.providers.microsoft.azure.operators.container_instances.AzureContainerInstanceHook",
         autospec=True,
     )
-    def test_execute_deferrable_defers_when_container_running(self, aci_mock):
-        """When deferrable=True and the container is still running, defer() is called."""
-        running_cg = make_mock_container(state="Running", exit_code=0, detail_status="test")
-        aci_mock.return_value.get_state.return_value = running_cg
+    def test_execute_deferrable_defers_unconditionally(self, aci_mock):
+        """When deferrable=True, defer() is called immediately after create_or_update."""
         aci_mock.return_value.exists.return_value = False
 
         aci = AzureContainerInstancesOperator(
@@ -668,37 +666,14 @@ class TestACIOperator:
         with pytest.raises(TaskDeferred) as exc_info:
             aci.execute(None)
 
+        assert aci_mock.return_value.create_or_update.call_count == 1
         assert isinstance(exc_info.value.trigger, AzureContainerInstanceTrigger)
         assert exc_info.value.trigger.resource_group == "resource-group"
         assert exc_info.value.trigger.name == "container-name"
         assert exc_info.value.trigger.polling_interval == 10.0
         assert exc_info.value.method_name == "execute_complete"
-        # Container must NOT be deleted when deferring — it is still running
         assert aci_mock.return_value.delete.call_count == 0
-
-    @mock.patch(
-        "airflow.providers.microsoft.azure.operators.container_instances.AzureContainerInstanceHook",
-        autospec=True,
-    )
-    def test_execute_deferrable_completes_synchronously_if_already_terminated(self, aci_mock):
-        """When deferrable=True but container is already terminal, no deferral — sync completion."""
-        terminated_cg = make_mock_container(state="Terminated", exit_code=0, detail_status="test")
-        aci_mock.return_value.get_state.return_value = terminated_cg
-        aci_mock.return_value.exists.return_value = False
-
-        aci = AzureContainerInstancesOperator(
-            ci_conn_id="azure_default",
-            registry_conn_id=None,
-            resource_group="resource-group",
-            name="container-name",
-            image="container-image",
-            region="region",
-            task_id="task",
-            deferrable=True,
-        )
-        result = aci.execute(None)
-        assert result == 0
-        assert aci_mock.return_value.create_or_update.call_count == 1
+        assert aci_mock.return_value.get_state.call_count == 0
 
     @mock.patch(
         "airflow.providers.microsoft.azure.operators.container_instances.AzureContainerInstanceHook",
@@ -768,7 +743,7 @@ class TestACIOperator:
         autospec=True,
     )
     def test_execute_complete_error_event_raises(self, aci_mock):
-        """execute_complete raises AirflowException when event has status=error."""
+        """execute_complete raises RuntimeError when event has status=error."""
         aci = AzureContainerInstancesOperator(
             ci_conn_id="azure_default",
             registry_conn_id=None,

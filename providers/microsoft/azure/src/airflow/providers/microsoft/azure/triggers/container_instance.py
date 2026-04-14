@@ -77,9 +77,14 @@ class AzureContainerInstanceTrigger(BaseTrigger):
                         exit_code = c_state.exit_code
                         detail_status = c_state.detail_status
                     else:
-                        state = cg_state.provisioning_state
-                        exit_code = 0
-                        detail_status = "Provisioning"
+                        prov = cg_state.provisioning_state
+                        if prov in ("Failed", "Unhealthy"):
+                            state = prov
+                            exit_code = 1
+                            detail_status = prov
+                        else:
+                            await asyncio.sleep(self.polling_interval)
+                            continue
 
                     if state in TERMINAL_STATES:
                         if state in SUCCESS_STATES and exit_code == 0:
@@ -110,6 +115,8 @@ class AzureContainerInstanceTrigger(BaseTrigger):
                         return
 
                     await asyncio.sleep(self.polling_interval)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             yield TriggerEvent(
                 {

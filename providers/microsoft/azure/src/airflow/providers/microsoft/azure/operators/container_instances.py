@@ -400,27 +400,17 @@ class AzureContainerInstancesOperator(BaseOperator):
             self.log.info("Container group started %s/%s", self.resource_group, self.name)
 
             if self.deferrable:
-                cg_state = self.hook.get_state(self.resource_group, self.name)
-                instance_view = cg_state.containers[0].instance_view
-                current_state = (
-                    instance_view.current_state.state
-                    if instance_view is not None
-                    else cg_state.provisioning_state
+                _cleanup = False
+                self.defer(
+                    trigger=AzureContainerInstanceTrigger(
+                        resource_group=self.resource_group,
+                        name=self.name,
+                        ci_conn_id=self.ci_conn_id,
+                        polling_interval=self.polling_interval,
+                    ),
+                    method_name=self.execute_complete.__name__,
+                    timeout=self.execution_timeout,
                 )
-                terminal_states = {"Terminated", "Succeeded", "Failed", "Unhealthy"}
-                if current_state not in terminal_states:
-                    _cleanup = False  # container is still running; do not delete on TaskDeferred
-                    self.defer(
-                        trigger=AzureContainerInstanceTrigger(
-                            resource_group=self.resource_group,
-                            name=self.name,
-                            ci_conn_id=self.ci_conn_id,
-                            polling_interval=self.polling_interval,
-                        ),
-                        method_name=self.execute_complete.__name__,
-                        timeout=self.execution_timeout,
-                    )
-                # Already terminal — fall through to synchronous completion below.
 
             exit_code = self._monitor_logging(self.resource_group, self.name)
             if self.xcom_all is not None:
